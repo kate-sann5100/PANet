@@ -32,7 +32,6 @@ class FewShotSeg(nn.Module):
         self.encoder = nn.Sequential(OrderedDict([
             ('backbone', Encoder(in_channels, self.pretrained_path)),]))
 
-
     def forward(self, supp_imgs, fore_mask, back_mask, qry_imgs):
         """
         Args:
@@ -71,19 +70,21 @@ class FewShotSeg(nn.Module):
         outputs = []
         for epi in range(batch_size):
             ###### Extract prototype ######
-            supp_fg_fts = [[self.getFeatures(supp_fts[way, shot, [epi]],
-                                             fore_mask[way, shot, [epi]])
-                            for shot in range(n_shots)] for way in range(n_ways)]
+            supp_fg_fts = [[self.getFeatures(supp_fts[way, shot, [epi]],  # [C x H' x W']
+                                             fore_mask[way, shot, [epi]])  # [H' x W']
+                            for shot in range(n_shots)] for way in range(n_ways)]  # Wa x Sh x [1 x C]
             supp_bg_fts = [[self.getFeatures(supp_fts[way, shot, [epi]],
                                              back_mask[way, shot, [epi]])
-                            for shot in range(n_shots)] for way in range(n_ways)]
+                            for shot in range(n_shots)] for way in range(n_ways)]  # Wa x Sh x [1 x C]
 
             ###### Obtain the prototypes######
             fg_prototypes, bg_prototype = self.getPrototype(supp_fg_fts, supp_bg_fts)
+            # Wa x [1 x C], [1 x C]
 
             ###### Compute the distance ######
-            prototypes = [bg_prototype,] + fg_prototypes
+            prototypes = [bg_prototype,] + fg_prototypes  # (1 + Wa) x [1 x C]
             dist = [self.calDist(qry_fts[:, epi], prototype) for prototype in prototypes]
+            # (1 + Wa) x [N x H' x W']
             pred = torch.stack(dist, dim=1)  # N x (1 + Wa) x H' x W'
             outputs.append(F.interpolate(pred, size=img_size, mode='bilinear'))
 
@@ -97,7 +98,6 @@ class FewShotSeg(nn.Module):
         output = output.view(-1, *output.shape[2:])
         return output, align_loss / batch_size
 
-
     def calDist(self, fts, prototype, scaler=20):
         """
         Calculate the distance between features and prototypes
@@ -107,10 +107,12 @@ class FewShotSeg(nn.Module):
                 expect shape: N x C x H x W
             prototype: prototype of one semantic class
                 expect shape: 1 x C
+
+        Returns:
+            dist: expect shape: [N x H x W]
         """
         dist = F.cosine_similarity(fts, prototype[..., None, None], dim=1) * scaler
         return dist
-
 
     def getFeatures(self, fts, mask):
         """
@@ -119,12 +121,15 @@ class FewShotSeg(nn.Module):
         Args:
             fts: input features, expect shape: 1 x C x H' x W'
             mask: binary mask, expect shape: 1 x H x W
+
+        Returns:
+            masked_fts: feature sum over foreground, expected shape: 1 x C
         """
         fts = F.interpolate(fts, size=mask.shape[-2:], mode='bilinear')
+        # [1 x C x H' x W'] -> [1 x C]
         masked_fts = torch.sum(fts * mask[None, ...], dim=(2, 3)) \
-            / (mask[None, ...].sum(dim=(2, 3)) + 1e-5) # 1 x C
+            / (mask[None, ...].sum(dim=(2, 3)) + 1e-5)
         return masked_fts
-
 
     def getPrototype(self, fg_fts, bg_fts):
         """
@@ -135,12 +140,15 @@ class FewShotSeg(nn.Module):
                 expect shape: Wa x Sh x [1 x C]
             bg_fts: lists of list of background features for each way/shot
                 expect shape: Wa x Sh x [1 x C]
+
+        Returns:
+            fg_prototypes: Wa x [1 x C]
+            bg_prototype: [1 x C]
         """
         n_ways, n_shots = len(fg_fts), len(fg_fts[0])
         fg_prototypes = [sum(way) / n_shots for way in fg_fts]
         bg_prototype = sum([sum(way) / n_shots for way in bg_fts]) / n_ways
         return fg_prototypes, bg_prototype
-
 
     def alignLoss(self, qry_fts, pred, supp_fts, fore_mask, back_mask):
         """
@@ -157,16 +165,17 @@ class FewShotSeg(nn.Module):
                 expect shape: way x shot x H x W
             back_mask: background masks for support images
                 expect shape: way x shot x H x W
+
         """
         n_ways, n_shots = len(fore_mask), len(fore_mask[0])
 
         # Mask and get query prototype
-        pred_mask = pred.argmax(dim=1, keepdim=True)  # N x 1 x H' x W'
-        binary_masks = [pred_mask == i for i in range(1 + n_ways)]
-        skip_ways = [i for i in range(n_ways) if binary_masks[i + 1].sum() == 0]
-        pred_mask = torch.stack(binary_masks, dim=1).float()  # N x (1 + Wa) x 1 x H' x W'
-        qry_prototypes = torch.sum(qry_fts.unsqueeze(1) * pred_mask, dim=(0, 3, 4))
-        qry_prototypes = qry_prototypes / (pred_mask.sum((0, 3, 4)) + 1e-5)  # (1 + Wa) x C
+        pred_mask = pred.argmax(dim=1, keepdim=True)  # [N x 1 x H' x W']
+        binary_masks = [pred_mask == i for i in range(1 + n_ways)]  # (1 + Wa) x [N x 1 x H' x W']
+        skip_ways = [i for i in range(n_ways) if binary_masks[i + 1].sum() == 0]  # num of skip ways
+        pred_mask = torch.stack(binary_masks, dim=1).float()  # [N x (1 + Wa) x 1 x H' x W']
+        qry_prototypes = torch.sum(qry_fts.unsqueeze(1) * pred_mask, dim=(0, 3, 4))  # [(1 + Wa) x C]
+        qry_prototypes = qry_prototypes / (pred_mask.sum((0, 3, 4)) + 1e-5)  # [(1 + Wa) x C]
 
         # Compute the support loss
         loss = 0
@@ -174,11 +183,11 @@ class FewShotSeg(nn.Module):
             if way in skip_ways:
                 continue
             # Get the query prototypes
-            prototypes = [qry_prototypes[[0]], qry_prototypes[[way + 1]]]
+            prototypes = [qry_prototypes[[0]], qry_prototypes[[way + 1]]]  # 2 x [1 x C]
             for shot in range(n_shots):
-                img_fts = supp_fts[way, [shot]]
-                supp_dist = [self.calDist(img_fts, prototype) for prototype in prototypes]
-                supp_pred = torch.stack(supp_dist, dim=1)
+                img_fts = supp_fts[way, [shot]]  # [1 x C x H' x W']
+                supp_dist = [self.calDist(img_fts, prototype) for prototype in prototypes]  # 2 x [1 x H x W]
+                supp_pred = torch.stack(supp_dist, dim=1)  # [1 x 2 x H x W]
                 supp_pred = F.interpolate(supp_pred, size=fore_mask.shape[-2:],
                                           mode='bilinear')
                 # Construct the support Ground-Truth segmentation
